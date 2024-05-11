@@ -55,24 +55,24 @@ class IntegratedBrdfNetwork(nn.Module):
 
 		for i in range((len(self.net) + 1) // 2):
 			weight = self.net[i * 2].weight.data
-			dim = weight.size()[1]
-			file.write(f"float const {var_name}_layer_{i + 1}_weight[][{dim}] = {{\n")
-			for row_count, row in enumerate(weight):
+			dim0 = weight.size()[0]
+			dim1 = weight.size()[1]
+			file.write(f"float const {var_name}_layer_{i + 1}_weight[][{dim1}] = {{\n")
+			for row_index, row in enumerate(weight):
 				file.write("\t{")
-				for col_count, col in enumerate(row):
+				for col_index, col in enumerate(row):
 					file.write(f"{col:.9f}f")
-					if (row_count != len(weight) - 1) or (col_count != len(row) - 1):
-						if col_count != len(row) - 1:
-							file.write(", ")
+					if ((row_index != dim0 - 1) or (col_index != dim1 - 1)) and (col_index != dim1 - 1):
+						file.write(", ")
 				file.write("},\n")
 			file.write("};\n")
 
 			bias = self.net[i * 2].bias.data
-			dim = bias.size()[0]
+			dim0 = bias.size()[0]
 			file.write(f"float const {var_name}_layer_{i + 1}_bias[]{{")
-			for col_count, col in enumerate(bias):
+			for col_index, col in enumerate(bias):
 				file.write(f"{col:.9f}f")
-				if col_count != len(bias) - 1:
+				if col_index != dim0 - 1:
 					file.write(", ")
 			file.write("};\n\n")
 
