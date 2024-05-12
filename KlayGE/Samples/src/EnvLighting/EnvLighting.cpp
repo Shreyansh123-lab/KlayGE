@@ -31,13 +31,14 @@
 #define ANALYSE_FITTING_ERRORS
 
 //#define CALC_NN_TABLE
-#define ANALYSE_NN_ERRORS
+#define ANALYSE_MLP_ERRORS
+#define ANALYSE_KAN_ERRORS
 
 #include <iterator>
 #include <sstream>
 #include <vector>
 
-#if defined(ANALYSE_DOWNSAMPLE_ERRORS) || defined(ANALYSE_FITTING_ERRORS) || defined(ANALYSE_NN_ERRORS)
+#if defined(ANALYSE_DOWNSAMPLE_ERRORS) || defined(ANALYSE_FITTING_ERRORS) || defined(ANALYSE_MLP_ERRORS) || defined(ANALYSE_KAN_ERRORS)
 #include <iostream>
 #endif
 
@@ -74,11 +75,13 @@ namespace
 			techs_[0] = effect_->TechniqueByName("PBFittingPrefiltered");
 			techs_[1] = effect_->TechniqueByName("PBPrefiltered");
 			techs_[2] = effect_->TechniqueByName("PBFittingError");
-			techs_[3] = effect_->TechniqueByName("PBNNPrefiltered");
-			techs_[4] = effect_->TechniqueByName("PBNNError");
-			techs_[5] = effect_->TechniqueByName("Prefiltered");
-			techs_[6] = effect_->TechniqueByName("Approximate");
-			techs_[7] = effect_->TechniqueByName("GroundTruth");
+			techs_[3] = effect_->TechniqueByName("PBMlpNnPrefiltered");
+			techs_[4] = effect_->TechniqueByName("PBMlpNnError");
+			techs_[5] = effect_->TechniqueByName("PBKanNnPrefiltered");
+			techs_[6] = effect_->TechniqueByName("PBKanNnError");
+			techs_[7] = effect_->TechniqueByName("Prefiltered");
+			techs_[8] = effect_->TechniqueByName("Approximate");
+			techs_[9] = effect_->TechniqueByName("GroundTruth");
 			this->RenderingType(0);
 
 			{
@@ -204,7 +207,7 @@ namespace
 		}
 
 	private:
-		array<RenderTechnique*, 8> techs_;
+		std::array<RenderTechnique*, 10> techs_;
 	};
 
 	float4 const diff_parametes[] =
@@ -664,7 +667,7 @@ namespace
 	}
 #endif
 
-#if defined(ANALYSE_DOWNSAMPLE_ERRORS) || defined(ANALYSE_FITTING_ERRORS) || defined(ANALYSE_NN_ERRORS)
+#if defined(ANALYSE_DOWNSAMPLE_ERRORS) || defined(ANALYSE_FITTING_ERRORS) || defined(ANALYSE_MLP_ERRORS) || defined(ANALYSE_KAN_ERRORS)
 	void AnalyseError(std::vector<float2> const& ground_truth_table, std::vector<float2> const& test_table, uint32_t width, uint32_t height)
 	{
 		float2 mse(0, 0);
@@ -764,7 +767,7 @@ namespace
 	}
 #endif
 
-#ifdef ANALYSE_NN_ERRORS
+#ifdef ANALYSE_MLP_ERRORS
 	template <typename T>
 	T Sigmoid(T const& x)
 	{
@@ -783,7 +786,7 @@ namespace
 	}
 
 	template <size_t L0, size_t L1, size_t L2>
-	float EvalL3NN(float const (&layer_0)[L0],
+	float EvalL3Mlp(float const (&layer_0)[L0],
 		float const (&nn_layer_1_weight)[L1][L0], float const (&nn_layer_1_bias)[L1],
 		float const (&nn_layer_2_weight)[L2][L1], float const (&nn_layer_2_bias)[L2])
 	{
@@ -796,7 +799,7 @@ namespace
 	}
 
 	template <size_t L0, size_t L1, size_t L2, size_t L3>
-	float EvalL4NN(float const (&layer_0)[L0],
+	float EvalL4Mlp(float const (&layer_0)[L0],
 		float const (&nn_layer_1_weight)[L1][L0], float const (&nn_layer_1_bias)[L1],
 		float const (&nn_layer_2_weight)[L2][L1], float const (&nn_layer_2_bias)[L2],
 		float const (&nn_layer_3_weight)[L3][L2], float const (&nn_layer_3_bias)[L3])
@@ -814,7 +817,7 @@ namespace
 		return Dot(nn_layer_3_weight[0], layer_2) + nn_layer_3_bias[0];
 	}
 
-	std::vector<float2> GenL4NeuralNetworkBRDF(uint32_t width, uint32_t height)
+	std::vector<float2> GenL4MlpNeuralNetworkBRDF(uint32_t width, uint32_t height)
 	{
 		float const x_nn_layer_1_weight[][2] = {
 			{1.698710799f, -6.031820297f},
@@ -855,11 +858,11 @@ namespace
 
 				float const xy[] = {n_dot_v, glossiness};
 
-				float const x_layer_3 = EvalL4NN(xy,
+				float const x_layer_3 = EvalL4Mlp(xy,
 					x_nn_layer_1_weight, x_nn_layer_1_bias,
 					x_nn_layer_2_weight, x_nn_layer_2_bias,
 					x_nn_layer_3_weight, x_nn_layer_3_bias);
-				float const y_layer_2 = EvalL3NN(xy,
+				float const y_layer_2 = EvalL3Mlp(xy,
 					y_nn_layer_1_weight, y_nn_layer_1_bias,
 					y_nn_layer_2_weight, y_nn_layer_2_bias);
 
@@ -868,6 +871,161 @@ namespace
 		}
 
 		return nn_brdf_f32;
+	}
+#endif
+
+#ifdef ANALYSE_KAN_ERRORS
+	template <typename T>
+	T ReLU(T const& x)
+	{
+		return std::max(static_cast<T>(0), x);
+	}
+
+	constexpr uint32_t GridSize = 1;
+	constexpr uint32_t SplineOrder = 2;
+
+	void BSplines(float input, float result[GridSize + SplineOrder])
+	{
+		constexpr float Grid[] = {-5, -3, -1,  1,  3,  5};
+		static_assert(std::size(Grid) == SplineOrder + GridSize + SplineOrder + 1);
+
+		float bases[SplineOrder + GridSize + SplineOrder];
+		for (uint32_t i = 0; i < SplineOrder + GridSize + SplineOrder; ++i)
+		{
+			bases[i] = (input >= Grid[i]) && (input < Grid[i + 1]);
+		}
+
+		for (uint32_t k = 1; k < SplineOrder + 1; ++k)
+		{
+			for (uint32_t i = 0; i < SplineOrder + GridSize + SplineOrder - k; ++i)
+			{
+				bases[i] = (input - Grid[i]) / (Grid[k + i] - Grid[i]) * bases[i] +
+							((Grid[k + 1 + i] - input) / (Grid[k + 1 + i] - Grid[1 + i])) * bases[i + 1];
+			}
+		}
+
+		for (uint32_t i = 0; i < GridSize + SplineOrder; ++i)
+		{
+			result[i] = bases[i];
+		}
+	}
+
+	template <size_t InFeatures, size_t OutFeatures>
+	void KanForward(float const (&input)[InFeatures], float const (&base_weight)[OutFeatures][InFeatures],
+		float const (&scaled_spline_weight)[OutFeatures][InFeatures][GridSize + SplineOrder], float (&output)[OutFeatures])
+	{
+		float activate_in[InFeatures];
+		float b_splines_in[InFeatures][GridSize + SplineOrder];
+		for (uint32_t i = 0; i < InFeatures; ++i)
+		{
+			activate_in[i] = ReLU(input[i]);
+			BSplines(input[i], b_splines_in[i]);
+		}
+
+		for (uint32_t i = 0; i < OutFeatures; ++i)
+		{
+			output[i] = 0;
+			for (uint32_t j = 0; j < InFeatures; ++j)
+			{
+				output[i] += activate_in[j] * base_weight[i][j];
+				for (uint32_t k = 0; k < GridSize + SplineOrder; ++k)
+				{
+					output[i] += b_splines_in[j][k] * scaled_spline_weight[i][j][k];
+				}
+			}
+		}
+	}
+
+	template <size_t L0, size_t L1, size_t L2>
+	float EvalL3Kan(float const (&layer_0)[L0],
+		float const (&kan_layer_1_base_weight)[L1][L0], float const (&kan_layer_1_scaled_spline_weight)[L1][L0][GridSize + SplineOrder],
+		float const (&kan_layer_2_base_weight)[L2][L1], float const (&kan_layer_2_scaled_spline_weight)[L2][L1][GridSize + SplineOrder])
+	{
+		static_assert(L2 == 1);
+
+		float layer_1[L1];
+		KanForward(layer_0, kan_layer_1_base_weight, kan_layer_1_scaled_spline_weight, layer_1);
+
+		float layer_2[L2];
+		KanForward(layer_1, kan_layer_2_base_weight, kan_layer_2_scaled_spline_weight, layer_2);
+
+		return layer_2[0];
+	}
+
+	std::vector<float2> GenL3KanNeuralNetworkBRDF(uint32_t width, uint32_t height)
+	{
+		float const x_kan_layer_1_base_weight[][2] = {
+			{-1.533318877f, -0.177919418f},
+			{0.667444229f, -2.907330751f},
+		};
+		float const x_kan_layer_1_scaled_spline_weight[][2][3] = {
+			{
+				{3.340777397f, 0.438279629f, -0.716442466f},
+				{13.258321762f, 0.444858730f, 1.149049997f},
+			},
+			{
+				{-8.731234550f, -0.195254281f, 1.023126364f},
+				{-12.617908478f, 2.421995163f, -6.325132370f},
+			},
+		};
+
+		float const x_kan_layer_2_base_weight[][2] = {
+			{0.049643919f, -0.160301566f},
+		};
+		float const x_kan_layer_2_scaled_spline_weight[][2][3] = {
+			{
+				{1.749079704f, 0.081547886f, -0.173867196f},
+				{0.059698336f, 0.427082509f, 0.281334043f},
+			},
+		};
+
+		float const y_kan_layer_1_base_weight[][2] = {
+			{0.540755570f, -0.293241560f},
+			{-0.822410166f, 0.321761012f},
+		};
+		float const y_kan_layer_1_scaled_spline_weight[][2][3] = {
+			{
+				{10.003301620f, -2.391380548f, 2.107568502f},
+				{1.743881464f, -0.316108942f, 0.455026537f},
+			},
+			{
+				{-6.832652569f, 1.835685968f, -5.013943195f},
+				{-3.251152992f, 0.435529113f, -0.533867478f},
+			},
+		};
+
+		float const y_kan_layer_2_base_weight[][2] = {
+			{-0.015559956f, -0.063676387f},
+		};
+		float const y_kan_layer_2_scaled_spline_weight[][2][3] = {
+			{
+				{-0.076168276f, -0.244602069f, 0.214840800f},
+				{0.183108643f, 0.186333150f, 0.238902688f},
+			},
+		};
+
+		std::vector<float2> kan_brdf_f32(width * height);
+		for (uint32_t y = 0; y < height; ++y)
+		{
+			float const glossiness = (y + 0.5f) / height;
+			for (uint32_t x = 0; x < width; ++x)
+			{
+				float const n_dot_v = (x + 0.5f) / width;
+
+				float const xy[] = {n_dot_v, glossiness};
+
+				float const x_layer_2 = EvalL3Kan(xy,
+					x_kan_layer_1_base_weight, x_kan_layer_1_scaled_spline_weight,
+					x_kan_layer_2_base_weight, x_kan_layer_2_scaled_spline_weight);
+				float const y_layer_2 = EvalL3Kan(xy,
+					y_kan_layer_1_base_weight, y_kan_layer_1_scaled_spline_weight,
+					y_kan_layer_2_base_weight, y_kan_layer_2_scaled_spline_weight);
+
+				kan_brdf_f32[y * width + x] = {x_layer_2, y_layer_2};
+			}
+		}
+
+		return kan_brdf_f32;
 	}
 #endif
 #endif
@@ -905,7 +1063,7 @@ void EnvLightingApp::OnCreate()
 			QuantizeToTexture(WIDTH, HEIGHT, GenIntegratedBRDF(WIDTH, HEIGHT)), "../../Samples/media/EnvLighting/IntegratedBRDF.dds");
 	}
 
-#if defined(ANALYSE_DOWNSAMPLE_ERRORS) || defined(ANALYSE_FITTING_ERRORS) || defined(ANALYSE_NN_ERRORS)
+#if defined(ANALYSE_DOWNSAMPLE_ERRORS) || defined(ANALYSE_FITTING_ERRORS) || defined(ANALYSE_MLP_ERRORS) || defined(ANALYSE_KAN_ERRORS)
 	std::vector<float2> gt_integrate_brdf = GenIntegratedBRDF(WIDTH, HEIGHT);
 	{
 		float2 min_val(1, 1);
@@ -1057,12 +1215,21 @@ void EnvLightingApp::OnCreate()
 	}
 #endif
 
-#ifdef ANALYSE_NN_ERRORS
+#ifdef ANALYSE_MLP_ERRORS
 	{
-		std::vector<float2> nn_brdf = GenL4NeuralNetworkBRDF(WIDTH, HEIGHT);
+		std::vector<float2> mlp_brdf = GenL4MlpNeuralNetworkBRDF(WIDTH, HEIGHT);
 
-		std::cout << "4-layer neural network" << std::endl;
-		AnalyseError(gt_integrate_brdf, nn_brdf, WIDTH, HEIGHT);
+		std::cout << "4-layer MLP neural network" << std::endl;
+		AnalyseError(gt_integrate_brdf, mlp_brdf, WIDTH, HEIGHT);
+	}
+#endif
+
+#ifdef ANALYSE_KAN_ERRORS
+	{
+		std::vector<float2> kan_brdf = GenL3KanNeuralNetworkBRDF(WIDTH, HEIGHT);
+
+		std::cout << "3-layer KAN neural network" << std::endl;
+		AnalyseError(gt_integrate_brdf, kan_brdf, WIDTH, HEIGHT);
 	}
 #endif
 

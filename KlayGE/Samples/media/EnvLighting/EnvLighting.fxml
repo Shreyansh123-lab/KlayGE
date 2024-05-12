@@ -88,7 +88,7 @@ float3 Sigmoid(float3 x)
 	return 1 / (1 + exp(-x));
 }
 
-float EvalL3NN(float2 layer_0,
+float EvalL3Mlp(float2 layer_0,
 	float3x2 nn_layer_1_weight, float3 nn_layer_1_bias,
 	float3 nn_layer_2_weight, float nn_layer_2_bias)
 {
@@ -109,7 +109,7 @@ float EvalL3NN(float2 layer_0,
 	return layer_2;
 }
 
-float EvalL4NN(float2 layer_0,
+float EvalL4Mlp(float2 layer_0,
 	float2x2 nn_layer_1_weight, float2 nn_layer_1_bias,
 	float2x2 nn_layer_2_weight, float2 nn_layer_2_bias,
 	float2 nn_layer_3_weight, float nn_layer_3_bias)
@@ -135,7 +135,7 @@ float EvalL4NN(float2 layer_0,
 	return layer_3;
 }
 
-float3 CalcEnvSpecularNN(float3 prefiltered_env, float3 c_spec, float glossiness, float3 normal, float3 view)
+float3 CalcEnvSpecularMlpNn(float3 prefiltered_env, float3 c_spec, float glossiness, float3 normal, float3 view)
 {
 	const float2x2 x_nn_layer_1_weight = {
 		{1.698710799f, -6.031820297f},
@@ -165,11 +165,11 @@ float3 CalcEnvSpecularNN(float3 prefiltered_env, float3 c_spec, float glossiness
 	float n_dot_v = saturate(dot(normal, view));
 	float2 xy = float2(n_dot_v, glossiness);
 	float2 env_brdf;
-	env_brdf.x = EvalL4NN(xy,
+	env_brdf.x = EvalL4Mlp(xy,
 		x_nn_layer_1_weight, x_nn_layer_1_bias,
 		x_nn_layer_2_weight, x_nn_layer_2_bias,
 		x_nn_layer_3_weight, x_nn_layer_3_bias);
-	env_brdf.y = EvalL3NN(xy,
+	env_brdf.y = EvalL3Mlp(xy,
 		y_nn_layer_1_weight, y_nn_layer_1_bias,
 		y_nn_layer_2_weight, y_nn_layer_2_bias);
 
@@ -177,13 +177,171 @@ float3 CalcEnvSpecularNN(float3 prefiltered_env, float3 c_spec, float glossiness
 	return prefiltered_env * (c_spec * env_brdf.x + env_brdf.y);
 }
 
-float3 PBNNPrefilteredSpecularIBL(float3 c_spec, float glossiness, float3 normal, float3 view)
+float3 PBMlpNnPrefilteredSpecularIBL(float3 c_spec, float glossiness, float3 normal, float3 view)
 {
 	float mip = CalcPrefilteredEnvMip(glossiness, diff_spec_mip.y);
 	float3 r = CalcPrefilteredEnvVec(normal, view);
 	float3 prefiltered_clr = decode_hdr_yc(skybox_Ycube_tex.SampleLevel(skybox_sampler, r, mip).r,
 		skybox_Ccube_tex.SampleLevel(skybox_sampler, r, mip)).xyz;
-	return CalcEnvSpecularNN(prefiltered_clr, c_spec, glossiness, normal, view);
+	return CalcEnvSpecularMlpNn(prefiltered_clr, c_spec, glossiness, normal, view);
+}
+
+float2 ReLU(float2 x)
+{
+	return max(0, x);
+}
+
+float3 BSplines(float input)
+{
+	const uint GridSize = 1;
+	const uint SplineOrder = 2;
+	const float Grid[] = {-5, -3, -1,  1,  3,  5};
+
+	float bases[SplineOrder + GridSize + SplineOrder];
+	for (uint i = 0; i < SplineOrder + GridSize + SplineOrder; ++i)
+	{
+		bases[i] = (input >= Grid[i]) && (input < Grid[i + 1]);
+	}
+
+	for (uint k = 1; k < SplineOrder + 1; ++k)
+	{
+		for (uint i = 0; i < SplineOrder + GridSize + SplineOrder - k; ++i)
+		{
+			bases[i] = (input - Grid[i]) / (Grid[k + i] - Grid[i]) * bases[i] +
+						((Grid[k + 1 + i] - input) / (Grid[k + 1 + i] - Grid[1 + i])) * bases[i + 1];
+		}
+	}
+
+	float3 result;
+	[unroll]
+	for (i = 0; i < GridSize + SplineOrder; ++i)
+	{
+		result[i] = bases[i];
+	}
+	return result;
+}
+
+float2 KanForwardL1(float2 input, float2x2 base_weight, float2x3 scaled_spline_weight[2])
+{
+	float2 activate_in = ReLU(input);
+	float3 b_splines_in[2];
+	[unroll]
+	for (uint i = 0; i < 2; ++i)
+	{
+		b_splines_in[i] = BSplines(input[i]);
+	}
+
+	float2 output = 0;
+	[unroll]
+	for (i = 0; i < 2; ++i)
+	{
+		output[i] += dot(activate_in, base_weight[i]);
+
+		[unroll]
+		for (uint j = 0; j < 2; ++j)
+		{
+			output[i] += dot(b_splines_in[j], scaled_spline_weight[i][j]);
+		}
+	}
+
+	return output;
+}
+
+float KanForwardL2(float2 input, float2 base_weight, float2x3 scaled_spline_weight)
+{
+	float2 activate_in = ReLU(input);
+	float3 b_splines_in[2];
+	[unroll]
+	for (uint i = 0; i < 2; ++i)
+	{
+		b_splines_in[i] = BSplines(input[i]);
+	}
+
+	float output = 0;
+	output += dot(activate_in, base_weight);
+
+	[unroll]
+	for (uint j = 0; j < 2; ++j)
+	{
+		output += dot(b_splines_in[j], scaled_spline_weight[j]);
+	}
+
+	return output;
+}
+
+float EvalL3Kan(float2 layer_0,
+	float2x2 kan_layer_1_base_weight, float2x3 kan_layer_1_scaled_spline_weight[2],
+	float2 kan_layer_2_base_weight, float2x3 kan_layer_2_scaled_spline_weight)
+{
+	float2 layer_1 = KanForwardL1(layer_0, kan_layer_1_base_weight, kan_layer_1_scaled_spline_weight);
+	return KanForwardL2(layer_1, kan_layer_2_base_weight, kan_layer_2_scaled_spline_weight);
+}
+
+float3 CalcEnvSpecularKanNn(float3 prefiltered_env, float3 c_spec, float glossiness, float3 normal, float3 view)
+{
+	const float2x2 x_kan_layer_1_base_weight = {
+		{-1.533318877f, -0.177919418f},
+		{0.667444229f, -2.907330751f},
+	};
+	const float2x3 x_kan_layer_1_scaled_spline_weight[] = {
+		{
+			{3.340777397f, 0.438279629f, -0.716442466f},
+			{13.258321762f, 0.444858730f, 1.149049997f},
+		},
+		{
+			{-8.731234550f, -0.195254281f, 1.023126364f},
+			{-12.617908478f, 2.421995163f, -6.325132370f},
+		},
+	};
+
+	const float2 x_kan_layer_2_base_weight = {0.049643919f, -0.160301566f};
+	const float2x3 x_kan_layer_2_scaled_spline_weight = {
+		{1.749079704f, 0.081547886f, -0.173867196f},
+		{0.059698336f, 0.427082509f, 0.281334043f},
+	};
+
+	const float2x2 y_kan_layer_1_base_weight = {
+		{0.540755570f, -0.293241560f},
+		{-0.822410166f, 0.321761012f},
+	};
+	const float2x3 y_kan_layer_1_scaled_spline_weight[] = {
+		{
+			{10.003301620f, -2.391380548f, 2.107568502f},
+			{1.743881464f, -0.316108942f, 0.455026537f},
+		},
+		{
+			{-6.832652569f, 1.835685968f, -5.013943195f},
+			{-3.251152992f, 0.435529113f, -0.533867478f},
+		},
+	};
+
+	const float2 y_kan_layer_2_base_weight = {-0.015559956f, -0.063676387f};
+	const float2x3 y_kan_layer_2_scaled_spline_weight = {
+		{-0.076168276f, -0.244602069f, 0.214840800f},
+		{0.183108643f, 0.186333150f, 0.238902688f},
+	};
+
+	float n_dot_v = saturate(dot(normal, view));
+	float2 xy = float2(n_dot_v, glossiness);
+	float2 env_brdf;
+	env_brdf.x = EvalL3Kan(xy,
+		x_kan_layer_1_base_weight, x_kan_layer_1_scaled_spline_weight,
+		x_kan_layer_2_base_weight, x_kan_layer_2_scaled_spline_weight);
+	env_brdf.y = EvalL3Kan(xy,
+		y_kan_layer_1_base_weight, y_kan_layer_1_scaled_spline_weight,
+		y_kan_layer_2_base_weight, y_kan_layer_2_scaled_spline_weight);
+
+	env_brdf = saturate(env_brdf);
+	return prefiltered_env * (c_spec * env_brdf.x + env_brdf.y);
+}
+
+float3 PBKanNnPrefilteredSpecularIBL(float3 c_spec, float glossiness, float3 normal, float3 view)
+{
+	float mip = CalcPrefilteredEnvMip(glossiness, diff_spec_mip.y);
+	float3 r = CalcPrefilteredEnvVec(normal, view);
+	float3 prefiltered_clr = decode_hdr_yc(skybox_Ycube_tex.SampleLevel(skybox_sampler, r, mip).r,
+		skybox_Ccube_tex.SampleLevel(skybox_sampler, r, mip)).xyz;
+	return CalcEnvSpecularKanNn(prefiltered_clr, c_spec, glossiness, normal, view);
 }
 
 void GroundTruthVS(float4 pos		: POSITION,
@@ -227,23 +385,34 @@ float4 PBFittingPrefilteredPS(float3 normal : TEXCOORD0, float3 incident : TEXCO
 		+ PBFittingPrefilteredSpecularIBL(specular, glossiness, normal, incident), 1);
 }
 
-float4 PBNNPrefilteredPS(float3 normal : TEXCOORD0, float3 incident : TEXCOORD1) : SV_Target
+float4 PBMlpNnPrefilteredPS(float3 normal : TEXCOORD0, float3 incident : TEXCOORD1) : SV_Target
 {
 	normal = normalize(normal);
 	incident = normalize(incident);
 
 	return float4(PrefilteredDiffuseIBL(diffuse, normal)
-		+ PBNNPrefilteredSpecularIBL(specular, glossiness, normal, incident), 1);
+		+ PBMlpNnPrefilteredSpecularIBL(specular, glossiness, normal, incident), 1);
+}
+
+float4 PBKanNnPrefilteredPS(float3 normal : TEXCOORD0, float3 incident : TEXCOORD1) : SV_Target
+{
+	normal = normalize(normal);
+	incident = normalize(incident);
+
+	return float4(PrefilteredDiffuseIBL(diffuse, normal)
+		+ PBKanNnPrefilteredSpecularIBL(specular, glossiness, normal, incident), 1);
 }
 
 float4 ShowErrorPS(float3 normal : TEXCOORD0, float3 incident : TEXCOORD1) : SV_Target
 {
-#if FITTING
+#if METHOD == 0
 	float4 prefiltered = PBFittingPrefilteredPS(normal, incident);
-#else
-	float4 prefiltered = PBNNPrefilteredPS(normal, incident);
+#elif METHOD == 1
+	float4 prefiltered = PBMlpNnPrefilteredPS(normal, incident);
+#elif METHOD == 2
+	float4 prefiltered = PBKanNnPrefilteredPS(normal, incident);
 #endif
-	
+
 	float3 error = abs(prefiltered - PBPrefilteredPS(normal, incident)).xyz;
 
 	const float3 RGB_TO_LUM = float3(0.2126f, 0.7152f, 0.0722f);
@@ -481,21 +650,35 @@ float4 ApproximatePS(float3 normal : TEXCOORD0, float3 incident : TEXCOORD1) : S
 	</technique>
 	<technique name="PBFittingError">
 		<pass name="p0">
-			<macro name="FITTING" value="1"/>
+			<macro name="METHOD" value="0"/>
 
 			<state name="vertex_shader" value="GroundTruthVS()"/>
 			<state name="pixel_shader" value="ShowErrorPS()"/>
 		</pass>
 	</technique>
-	<technique name="PBNNPrefiltered">
+	<technique name="PBMlpNnPrefiltered">
 		<pass name="p0">
 			<state name="vertex_shader" value="GroundTruthVS()"/>
-			<state name="pixel_shader" value="PBNNPrefilteredPS()"/>
+			<state name="pixel_shader" value="PBMlpNnPrefilteredPS()"/>
 		</pass>
 	</technique>
-	<technique name="PBNNError">
+	<technique name="PBMlpNnError">
 		<pass name="p0">
-			<macro name="FITTING" value="0"/>
+			<macro name="METHOD" value="1"/>
+
+			<state name="vertex_shader" value="GroundTruthVS()"/>
+			<state name="pixel_shader" value="ShowErrorPS()"/>
+		</pass>
+	</technique>
+	<technique name="PBKanNnPrefiltered">
+		<pass name="p0">
+			<state name="vertex_shader" value="GroundTruthVS()"/>
+			<state name="pixel_shader" value="PBKanNnPrefilteredPS()"/>
+		</pass>
+	</technique>
+	<technique name="PBKanNnError">
+		<pass name="p0">
+			<macro name="METHOD" value="2"/>
 
 			<state name="vertex_shader" value="GroundTruthVS()"/>
 			<state name="pixel_shader" value="ShowErrorPS()"/>

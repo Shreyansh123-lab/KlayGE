@@ -7,8 +7,10 @@
 			<item name="PB Fitting Prefiltered"/>
 			<item name="PB Prefiltered"/>
 			<item name="PB Fitting Error"/>
-			<item name="PB NN Prefiltered"/>
-			<item name="PB NN Error"/>
+			<item name="PB MLP NN Prefiltered"/>
+			<item name="PB MLP NN Error"/>
+			<item name="PB KAN NN Prefiltered"/>
+			<item name="PB KAN NN Error"/>
 			<item name="Prefiltered"/>
 			<item name="Approximate"/>
 			<item name="Ground Truth"/>
